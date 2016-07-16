@@ -13,41 +13,48 @@ import requests
 import datetime
 import dateutil
 
-from mock import MagicMock as MM
+from artifactory import Config, ArtifactoryPath, PureArtifactoryPath, http
+from artifactory.paths import _ArtifactoryAccessor, _ArtifactoryFlavour
 
+try:
+  # attempt python 3 variant first
+  from unittest.mock import MagicMock as MM
+except ImportError:
+  # fallback to python 2
+  from mock import MagicMock as MM
 
 class UtilTest(unittest.TestCase):
     def test_matrix_encode(self):
         params = {"foo": "bar",
                   "qux": "asdf"}
 
-        s = artifactory.encode_matrix_parameters(params)
+        s = http.encode_matrix_parameters(params)
 
         self.assertEqual(s, "foo=bar;qux=asdf")
 
         params = {'baz': ['bar', 'quux'], 'foo': 'asdf'}
 
-        s = artifactory.encode_matrix_parameters(params)
+        s = http.encode_matrix_parameters(params)
 
         self.assertEqual(s, "baz=bar;baz=quux;foo=asdf")
 
     def test_escape_chars(self):
-        s = artifactory.escape_chars('a,b|c=d')
+        s = http.escape_chars('a,b|c=d')
         self.assertEqual(s, "a\,b\|c\=d")
 
     def test_properties_encode(self):
         params = {"foo": "bar,baz", "qux": "as=df"}
-        s = artifactory.encode_properties(params)
+        s = http.encode_properties(params)
         self.assertEqual(s, "foo=bar\\,baz|qux=as\\=df")
 
     def test_properties_encode_multi(self):
         params = {'baz': ['ba\\r', 'qu|ux'], 'foo': 'a,s=df'}
-        s = artifactory.encode_properties(params)
+        s = http.encode_properties(params)
         self.assertEqual(s, "baz=ba\\r,qu\|ux|foo=a\,s\=df")
 
 
 class ArtifactoryFlavorTest(unittest.TestCase):
-    flavour = artifactory._artifactory_flavour
+    flavour = _ArtifactoryFlavour()
 
     def _check_parse_parts(self, arg, expected):
         f = self.flavour.parse_parts
@@ -60,12 +67,10 @@ class ArtifactoryFlavorTest(unittest.TestCase):
             self.assertEqual(actual, expected)
 
     def setUp(self):
-        artifactory.global_config = {
-            'http://custom/root': {}
-        }
+      Config.load_yaml("---\nhttp://custom/root: {}\n")
 
     def tearDown(self):
-        artifactory.global_config = None
+        Config.clear()
 
     def _check_splitroot(self, arg, expected):
         f = self.flavour.splitroot
@@ -97,20 +102,14 @@ class ArtifactoryFlavorTest(unittest.TestCase):
     def test_splitroot_custom_root(self):
         check = self._check_splitroot
 
-        check("http://custom/root",
-              ('http://custom/root', '', ''))
-        check("custom/root",
-              ('custom/root', '', ''))
-        check("https://custom/root",
-              ('https://custom/root', '', ''))
-        check("http://custom/root/",
-              ('http://custom/root', '', ''))
-        check("http://custom/root/artifactory",
-              ('http://custom/root', '/artifactory/', ''))
-        check("http://custom/root/foo/bar",
-              ('http://custom/root', '/foo/', 'bar'))
-        check("https://custom/root/foo/baz",
-              ('https://custom/root', '/foo/', 'baz'))
+        check("http://custom/root", ('http://custom/root', '', ''))
+        check("custom/root", ('custom/root', '', ''))
+        check("https://custom/root", ('https://custom/root', '', ''))
+        check("http://custom/root/", ('http://custom/root', '', ''))
+        check("http://custom/root/artifactory", ('http://custom/root', '/artifactory/', ''))
+        check("http://custom/root/foo/bar", ('http://custom/root', '/foo/', 'bar'))
+        check("https://foo.bar.com/some-repository/", ('https://foo.bar.com', '/some-repository/', ''))
+        check("https://custom/root/foo/baz", ('https://custom/root', '/foo/', 'baz'))
 
 
     def test_parse_parts(self):
@@ -137,7 +136,7 @@ class ArtifactoryFlavorTest(unittest.TestCase):
 
 
 class PureArtifactoryPathTest(unittest.TestCase):
-    cls = artifactory.PureArtifactoryPath
+    cls = PureArtifactoryPath
 
     def test_root(self):
         P = self.cls
@@ -164,7 +163,7 @@ class PureArtifactoryPathTest(unittest.TestCase):
 
 class ArtifactoryAccessorTest(unittest.TestCase):
     """ Test the real artifactory integration """
-    cls = artifactory._ArtifactoryAccessor
+    cls = _ArtifactoryAccessor
 
     def setUp(self):
         self.file_stat = """
@@ -210,7 +209,7 @@ class ArtifactoryAccessorTest(unittest.TestCase):
 
     def test_stat(self):
         a = self.cls()
-        P = artifactory.ArtifactoryPath
+        P = ArtifactoryPath
 
         # Regular File
         p = P("http://artifactory.local/artifactory/api/storage/ext-release-local/org/company/tool/1.0/tool-1.0.tar.gz")
@@ -246,7 +245,7 @@ class ArtifactoryAccessorTest(unittest.TestCase):
 
     def test_listdir(self):
         a = self.cls()
-        P = artifactory.ArtifactoryPath
+        P = ArtifactoryPath
 
         # Directory
         p = P("http://artifactory.local/artifactory/api/storage/libs-release-local")
@@ -270,7 +269,7 @@ class ArtifactoryAccessorTest(unittest.TestCase):
 
     def test_deploy(self):
         a = self.cls()
-        P = artifactory.ArtifactoryPath
+        P = ArtifactoryPath
 
         p = P("http://b/artifactory/c/d")
 
@@ -289,7 +288,7 @@ class ArtifactoryAccessorTest(unittest.TestCase):
 
 class ArtifactoryPathTest(unittest.TestCase):
     """ Test the filesystem-accessing fuctionality """
-    cls = artifactory.ArtifactoryPath
+    cls = ArtifactoryPath
 
     def test_basic(self):
         P = self.cls
@@ -329,40 +328,54 @@ class ArtifactoryPathTest(unittest.TestCase):
 
 class TestArtifactoryConfig(unittest.TestCase):
     def test_artifactory_config(self):
-        cfg = "[foo.net/artifactory]\n" + \
-              "username=admin\n" + \
-              "password=ilikerandompasswords\n" + \
-              "verify=False\n" + \
-              "cert=~/path-to-cert\n" + \
-              "[http://bar.net/artifactory]\n" + \
-              "username=foo\n" + \
-              "password=bar\n"
+        cfg = {
+          'http://bar.net/artifactory': {
+            'username': 'foo', 
+            'password': 'bar'
+          }, 
+          'foo.net/artifactory': {
+            'username': 'admin', 
+            'verify': False, 
+            'cert': '~/path-to-cert', 
+            'password': 'ilikerandompasswords'
+          }, 
+          'http://artifactory.local/artifactory': {}
+        }
+        
+        Config.load(cfg)
+        
+        c = Config['foo.net/artifactory']
+        self.assertIsInstance(c, dict)
+        self.assertEqual(c['username'], 'admin')
+        self.assertEqual(c['password'], 'ilikerandompasswords')
+        self.assertEqual(c['verify'], False)
+        self.assertEqual(c['cert'], os.path.expanduser('~/path-to-cert'))
 
-        with tempfile.NamedTemporaryFile(mode='w+') as tf:
-            tf.write(cfg)
-            tf.flush()
-            cfg = artifactory.read_config(tf.name)
+        c = Config['http://bar.net/artifactory']
+        self.assertIsInstance(c, dict)
+        self.assertEqual(c['username'], 'foo')
+        self.assertEqual(c['password'], 'bar')
+        self.assertEqual(c['verify'], True)
 
-            c = artifactory.get_config_entry(cfg, 'foo.net/artifactory')
-            self.assertEqual(c['username'], 'admin')
-            self.assertEqual(c['password'], 'ilikerandompasswords')
-            self.assertEqual(c['verify'], False)
-            self.assertEqual(c['cert'],
-                              os.path.expanduser('~/path-to-cert'))
+        c = Config['bar.net/artifactory']
+        self.assertIsInstance(c, dict)
+        self.assertEqual(c['username'], 'foo')
+        self.assertEqual(c['password'], 'bar')
 
-            c = artifactory.get_config_entry(cfg, 'http://bar.net/artifactory')
-            self.assertEqual(c['username'], 'foo')
-            self.assertEqual(c['password'], 'bar')
-            self.assertEqual(c['verify'], True)
+        c = Config['https://bar.net/artifactory']
+        self.assertIsInstance(c, dict)
+        self.assertEqual(c['username'], 'foo')
+        self.assertEqual(c['password'], 'bar')
+        
+        c = Config['artifactory.local/artifactory/foo']
+        self.assertIsInstance(c, dict)
+        self.assertEqual(c['username'], None)
+        self.assertEqual(c['password'], None)
+        self.assertEqual(c['verify'], True)
+        self.assertEqual(c['cert'], None)
 
-            c = artifactory.get_config_entry(cfg, 'bar.net/artifactory')
-            self.assertEqual(c['username'], 'foo')
-            self.assertEqual(c['password'], 'bar')
-
-            c = artifactory.get_config_entry(cfg, 'https://bar.net/artifactory')
-            self.assertEqual(c['username'], 'foo')
-            self.assertEqual(c['password'], 'bar')
-
+        c = Config['foobarbaz']
+        self.assertIsNone(c)
 
 if __name__ == '__main__':
     unittest.main()

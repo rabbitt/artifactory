@@ -1,6 +1,6 @@
 # Python interface library for Jfrog Artifactory #
 
-[![Build Status](https://travis-ci.org/Parallels/artifactory.svg?branch=develop)](https://travis-ci.org/Parallels/artifactory)
+[![Build Status](https://travis-ci.org/rabbitt/artifactory.svg?branch=master)](https://travis-ci.org/rabbitt/artifactory)
 
 This module is intended to serve as a logical descendant of [pathlib](https://docs.python.org/3/library/pathlib.html), a Python 3 module for object-oriented path manipulations. As such, it implements everything as closely as possible to the origin with few exceptions, such as stat().
 
@@ -37,7 +37,7 @@ Download artifact to a local filesystem:
 from artifactory import ArtifactoryPath
 path = ArtifactoryPath(
     "http://repo.jfrog.org/artifactory/distributions/org/apache/tomcat/apache-tomcat-7.0.11.tar.gz")
-    
+
 with path.open() as fd:
     with open("tomcat.tar.gz", "wb") as out:
         out.write(fd.read())
@@ -61,7 +61,7 @@ Deploy a debian package ```myapp-1.0.deb```
 from artifactory import ArtifactoryPath
 path = ArtifactoryPath(
     "http://my-artifactory/artifactory/ubuntu-local/pool")
-path.deploy_deb('./myapp-1.0.deb', 
+path.deploy_deb('./myapp-1.0.deb',
                 distribution='trusty',
                 component='main',
                 architecture='amd64')
@@ -91,7 +91,7 @@ path = ArtifactoryPath(
 ```python
 from artifactory import ArtifactoryPath
 path = ArtifactoryPath(
-    "http://my-artifactory/artifactory/libs-snapshot-local/myapp/1.0", 
+    "http://my-artifactory/artifactory/libs-snapshot-local/myapp/1.0",
     verify=True)
 ```
 Specify a local cert to use as client side certificate
@@ -102,7 +102,7 @@ path = ArtifactoryPath(
     "http://my-artifactory/artifactory/libs-snapshot-local/myapp/1.0",
     cert="/path_to_file/server.pem")
 ```
-Disable host cert verification 
+Disable host cert verification
 
 ```python
 from artifactory import ArtifactoryPath
@@ -136,4 +136,4 @@ password = @dmin
 cert = ~/mycert
 ```
 
-Whether or not you specify ```http://``` or ```https://``` prefix is not essential. The module will first try to locate the best match and then try to match URLs without prefixes. So if in the config you specify ```https://my-instance.local``` and call ```ArtifactoryPath``` with ```http://my-instance.local```, it will still do the right thing. 
+Whether or not you specify ```http://``` or ```https://``` prefix is not essential. The module will first try to locate the best match and then try to match URLs without prefixes. So if in the config you specify ```https://my-instance.local``` and call ```ArtifactoryPath``` with ```http://my-instance.local```, it will still do the right thing.

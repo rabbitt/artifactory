@@ -2,6 +2,7 @@
 
 import os
 import re
+import sys
 
 try:
     from setuptools import setup
@@ -25,10 +26,17 @@ except ImportError:
           " could not convert Markdown to RST")
     read_md = lambda fname: open(os.path.join(os.path.dirname(__file__),
                                               fname), 'r').read()
+                                              
+dependencies = [
+  'pathlib',
+  'requests',
+  'python-dateutil',
+  'PyYAML'
+]
 
 setup(
     name='artifactory',
-    version='0.1.17',
+    version='0.1.18',
     py_modules=['artifactory'],
     license='MIT License',
     description='A Python to Artifactory interface',
@@ -49,7 +57,7 @@ setup(
     ],
     url='http://github.com/parallels/artifactory',
     download_url='http://github.com/parallels/artifactory',
-    install_requires=['pathlib', 'requests', 'python-dateutil'],
+    install_requires=dependencies,
     zip_safe=False,
     package_data={'': ['README.md']}
 )

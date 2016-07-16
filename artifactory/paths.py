@@ -1,31 +1,5 @@
-#!/usr/bin/env python
-# -*- coding: utf-8 -*-
-# vim:ts=4:sw=4:expandtab
-#
-# ==================================================================
-#
-# Copyright (c) 2005-2014 Parallels Software International, Inc.
-# Released under the terms of MIT license (see LICENSE for details)
-#
-# ==================================================================
-#
-# pylint: disable=no-self-use, maybe-no-member
-
-""" artifactory: a python module for interfacing with JFrog Artifactory
-
-This module is intended to serve as a logical descendant of pathlib
-(https://docs.python.org/3/library/pathlib.html), a Python 3 module
- for object-oriented path manipulations. As such, it implements
-everything as closely as possible to the origin with few exceptions,
-such as stat().
-
-There are PureArtifactoryPath and ArtifactoryPath that can be used
-to manipulate artifactory paths. See pathlib docs for details how
-pure paths can be used.
-"""
-
-import os
 import sys
+import collections
 import errno
 import pathlib
 import collections
@@ -33,259 +7,21 @@ import requests
 import re
 import json
 import dateutil.parser
-import hashlib
+
 try:
     import requests.packages.urllib3 as urllib3
 except ImportError:
     import urllib3
-try:
-    import configparser
-except ImportError:
-    import ConfigParser as configparser
 
+from . import http
+from . import utils
 
-default_config_path = '~/.artifactory_python.cfg'
-global_config = None
+from .urls import protoless_url, urlparse
+from .utils import export, singleton
+from .config import Config
 
-
-def read_config(config_path=default_config_path):
-    """
-    Read configuration file and produce a dictionary of the following structure:
-
-      {'<instance1>': {'username': '<user>', 'password': '<pass>',
-                       'verify': <True/False>, 'cert': '<path-to-cert>'}
-       '<instance2>': {...},
-       ...}
-
-    Format of the file:
-      [https://artifactory-instance.local/artifactory]
-      username = foo
-      password = @dmin
-      verify = false
-      cert = ~/path-to-cert
-
-    config-path - specifies where to read the config from
-    """
-    config_path = os.path.expanduser(config_path)
-    if not os.path.isfile(config_path):
-        raise OSError(errno.ENOENT,
-                      "Artifactory configuration file not found: '%s'" %
-                      config_path)
-
-    p = configparser.ConfigParser()
-    p.read(config_path)
-
-    result = {}
-
-    for section in p.sections():
-        username = p.get(section, 'username') if p.has_option(section, 'username') else None
-        password = p.get(section, 'password') if p.has_option(section, 'password') else None
-        verify = p.getboolean(section, 'verify') if p.has_option(section, 'verify') else True
-        cert = p.get(section, 'cert') if p.has_option(section, 'cert') else None
-
-
-        result[section] = {'username': username,
-                           'password': password,
-                           'verify': verify,
-                           'cert': cert}
-        # certificate path may contain '~', and we'd better expand it properly
-        if result[section]['cert']:
-            result[section]['cert'] = \
-                os.path.expanduser(result[section]['cert'])
-    return result
-
-
-def read_global_config(config_path=default_config_path):
-    """
-    Attempt to read global configuration file and store the result in
-    'global_config' variable.
-
-    config_path - specifies where to read the config from
-    """
-    global global_config
-
-    if global_config is None:
-        try:
-            global_config = read_config(config_path)
-        except OSError:
-            pass
-
-
-def without_http_prefix(url):
-    """
-    Returns a URL without the http:// or https:// prefixes
-    """
-    if url.startswith('http://'):
-        return url[7:]
-    elif url.startswith('https://'):
-        return url[8:]
-    return url
-
-def get_base_url(config, url):
-    """
-    Look through config and try to find best matching base for 'url'
-
-    config - result of read_config() or read_global_config()
-    url - artifactory url to search the base for
-    """
-    if not config:
-        return None
-
-    # First, try to search for the best match
-    for item in config:
-        if url.startswith(item):
-            return item
-
-    # Then search for indirect match
-    for item in config:
-        if without_http_prefix(url).startswith(without_http_prefix(item)):
-            return item
-
-def get_config_entry(config, url):
-    """
-    Look through config and try to find best matching entry for 'url'
-
-    config - result of read_config() or read_global_config()
-    url - artifactory url to search the config for
-    """
-    if not config:
-        return None
-
-    # First, try to search for the best match
-    if url in config:
-        return config[url]
-
-    # Then search for indirect match
-    for item in config:
-        if without_http_prefix(item) == without_http_prefix(url):
-            return config[item]
-
-
-def get_global_config_entry(url):
-    """
-    Look through global config and try to find best matching entry for 'url'
-
-    url - artifactory url to search the config for
-    """
-    read_global_config()
-    return get_config_entry(global_config, url)
-
-def get_global_base_url(url):
-    """
-    Look through global config and try to find best matching base for 'url'
-
-    url - artifactory url to search the base for
-    """
-    read_global_config()
-    return get_base_url(global_config, url)
-
-
-def md5sum(filename):
-    """
-    Calculates md5 hash of a file
-    """
-    md5 = hashlib.md5()
-    with open(filename, 'rb') as f:
-        for chunk in iter(lambda: f.read(128 * md5.block_size), b''):
-            md5.update(chunk)
-    return md5.hexdigest()
-
-
-def sha1sum(filename):
-    """
-    Calculates sha1 hash of a file
-    """
-    sha1 = hashlib.sha1()
-    with open(filename, 'rb') as f:
-        for chunk in iter(lambda: f.read(128 * sha1.block_size), b''):
-            sha1.update(chunk)
-    return sha1.hexdigest()
-
-
-class HTTPResponseWrapper(object):
-    """
-    This class is intended as a workaround for 'requests' module
-    inability to consume HTTPResponse as a streaming upload source.
-    I.e. if you want to download data from one url and upload it
-    to another.
-    The problem is that underlying code uses seek() and tell() to
-    calculate stream length, but HTTPResponse throws a NotImplementedError,
-    according to python file-like object implementation guidelines, since
-    the stream is obviously non-rewindable.
-    Another problem arises when requests.put() tries to calculate stream
-    length with other methods. It tries several ways, including len()
-    and __len__(), and falls back to reading the whole stream. But
-    since the stream is not rewindable, by the time it tries to send
-    actual content, there is nothing left in the stream.
-    """
-    def __init__(self, obj):
-        self.obj = obj
-
-    def __getattr__(self, attr):
-        """
-        Redirect member requests except seek() to original object
-        """
-        if attr in self.__dict__:
-            return self.__dict__[attr]
-
-        if attr == 'seek':
-            raise AttributeError
-
-        return getattr(self.obj, attr)
-
-    def __len__(self):
-        """
-        __len__ will be used by requests to determine stream size
-        """
-        return int(self.getheader('content-length'))
-
-
-def encode_matrix_parameters(parameters):
-    """
-    Performs encoding of url matrix parameters from dictionary to
-    a string.
-    See http://www.w3.org/DesignIssues/MatrixURIs.html for specs.
-    """
-    result = []
-
-    for param in iter(sorted(parameters)):
-        if isinstance(parameters[param], (list, tuple)):
-            value = (';%s=' % (param)).join(parameters[param])
-        else:
-            value = parameters[param]
-
-        result.append("%s=%s" % (param, value))
-
-    return ';'.join(result)
-
-
-def escape_chars(s):
-    """
-    Performs character escaping of comma, pipe and equals characters
-    """
-    return "".join(['\\' + ch if ch in '=|,' else ch for ch in s])
-
-
-def encode_properties(parameters):
-    """
-    Performs encoding of url parameters from dictionary to a string. It does
-    not escape backslash because it is not needed.
-
-    See: http://www.jfrog.com/confluence/display/RTF/Artifactory+REST+API#ArtifactoryRESTAPI-SetItemProperties
-    """
-    result = []
-
-    for param in iter(sorted(parameters)):
-        if isinstance(parameters[param], (list, tuple)):
-            value = ','.join([escape_chars(x) for x in parameters[param]])
-        else:
-            value = escape_chars(parameters[param])
-
-        result.append("%s=%s" % (param, value))
-
-    return '|'.join(result)
-
-
+@export
+@singleton
 class _ArtifactoryFlavour(pathlib._Flavour):
     """
     Implements Artifactory-specific pure path manipulations.
@@ -320,37 +56,39 @@ class _ArtifactoryFlavour(pathlib._Flavour):
         The next folder is treated as root, and everything else is taken
         for relative path.
         """
-        drv = ''
-        root = ''
 
-        base = get_global_base_url(part)
-        if base and without_http_prefix(part).startswith(without_http_prefix(base)):
-            mark = without_http_prefix(base).rstrip(sep)+sep
-            parts = part.split(mark)
+        base = Config.search(part.rstrip(sep))
+        url  = urlparse(part)
+
+        drive   = root = ''
+        relpath = url.path
+        
+        if base and protoless_url(part).startswith(protoless_url(base)):
+          mark = protoless_url(base).rstrip(sep) 
+          drive, relpath = part.partition(mark)[::2]
+          drive = '%s%s' % (drive, mark) 
         else:
-            mark = sep+'artifactory'+sep
-            parts = part.split(mark)
+          if url.scheme:
+            drive = '%s://' % url.scheme
 
-        if len(parts) >= 2:
-            drv = parts[0] + mark.rstrip(sep)
-            rest = sep + mark.join(parts[1:])
-        elif part.endswith(mark.rstrip(sep)):
-            drv = part
-            rest = ''
-        else:
-            rest = part
+          if url.netloc:
+            drive = '%s%s' % (drive, url.netloc)
 
-        if not rest:
-            return drv, '', ''
+          if '/artifactory' in relpath:
+            if not drive:
+              drive += relpath.partition('/artifactory')[::2][0] + '/artifactory'
+            else:
+              drive = '%s/artifactory' % drive
+            relpath = re.sub('^.*?/artifactory', '', relpath)
+            
+        if not relpath or relpath == sep:
+          return drive, '', ''
+          
+        if relpath.startswith(sep):
+          root, _, relpath = relpath[1:].partition(sep)
+          root = sep + root + sep
 
-        if rest == sep:
-            return drv, '', ''
-
-        if rest.startswith(sep):
-            root, _, part = rest[1:].partition(sep)
-            root = sep + root + sep
-
-        return drv, root, part
+        return drive, root, relpath
 
     def casefold(self, string):
         """
@@ -386,23 +124,28 @@ class _ArtifactoryFlavour(pathlib._Flavour):
         """
         return path
 
-
-_artifactory_flavour = _ArtifactoryFlavour()
-
 ArtifactoryFileStat = collections.namedtuple(
     'ArtifactoryFileStat',
     ['ctime',
      'mtime',
+     'st_ctime',
+     'st_mtime',
      'created_by',
      'modified_by',
      'mime_type',
      'size',
+     'st_size',
+     'sha512',
+     'sha256',
      'sha1',
      'md5',
      'is_dir',
      'children'])
+     
+export(ArtifactoryFileStat)
 
-
+@export
+@singleton
 class _ArtifactoryAccessor(pathlib._Accessor):
     """
     Implements operations with Artifactory REST API
@@ -479,11 +222,16 @@ class _ArtifactoryAccessor(pathlib._Accessor):
 
         The following fields are available:
           ctime -- file creation time
+          st_ctime -- file creation time
           mtime -- file modification time
+          st_mtime -- file modification time
           created_by -- original uploader
           modified_by -- last user modifying the file
           mime_type -- MIME type of the file
           size -- file size
+          st_size -- file size
+          sha512 -- SHA512 digest of the file
+          sha256 -- SHA256 digest of the file
           sha1 -- SHA1 digest of the file
           md5 -- MD5 digest of the file
           is_dir -- 'True' if path is a directory
@@ -499,17 +247,27 @@ class _ArtifactoryAccessor(pathlib._Accessor):
         if 'children' in jsn:
             children = [child['uri'][1:] for child in jsn['children']]
 
+        chksum_defaults = { 
+          'sha512': None, 'sha256': None, 
+          'sha1': None, 'md5': None 
+        }
+        
         stat = ArtifactoryFileStat(
-            ctime=dateutil.parser.parse(jsn['created']),
-            mtime=dateutil.parser.parse(jsn['lastModified']),
-            created_by=jsn.get('createdBy', None),
-            modified_by=jsn.get('modifiedBy', None),
-            mime_type=jsn.get('mimeType', None),
-            size=int(jsn.get('size', '0')),
-            sha1=jsn.get('checksums', {'sha1': None})['sha1'],
-            md5=jsn.get('checksums', {'md5': None})['md5'],
-            is_dir=is_dir,
-            children=children)
+            ctime       = dateutil.parser.parse(jsn['created']),
+            mtime       = dateutil.parser.parse(jsn['lastModified']),
+            st_ctime    = dateutil.parser.parse(jsn['created']),
+            st_mtime    = dateutil.parser.parse(jsn['lastModified']),
+            created_by  = jsn.get('createdBy', None),
+            modified_by = jsn.get('modifiedBy', None),
+            mime_type   = jsn.get('mimeType', None),
+            size        = int(jsn.get('size', '0')),
+            st_size     = int(jsn.get('size', '0')),
+            sha512      = utils.merge_dicts(chksum_defaults, jsn.get('checksums', {'sha512': None}))['sha512'],
+            sha256      = utils.merge_dicts(chksum_defaults, jsn.get('checksums', {'sha256': None}))['sha256'],
+            sha1        = utils.merge_dicts(chksum_defaults, jsn.get('checksums', {'sha1': None}))['sha1'],
+            md5         = utils.merge_dicts(chksum_defaults, jsn.get('checksums', {'md5': None}))['md5'],
+            is_dir      = is_dir,
+            children    = children)
 
         return stat
 
@@ -659,7 +417,7 @@ class _ArtifactoryAccessor(pathlib._Accessor):
 
         return raw
 
-    def deploy(self, pathobj, fobj, md5=None, sha1=None, parameters=None):
+    def deploy(self, pathobj, fobj, md5=None, sha1=None, sha256=None, sha512=None, parameters=None):
         """
         Uploads a given file-like object
         HTTP chunked encoding will be attempted
@@ -670,7 +428,7 @@ class _ArtifactoryAccessor(pathlib._Accessor):
         url = str(pathobj)
 
         if parameters:
-            url += ";%s" % encode_matrix_parameters(parameters)
+            url += ";%s" % http.encode_matrix_parameters(parameters)
 
         headers = {}
 
@@ -678,6 +436,10 @@ class _ArtifactoryAccessor(pathlib._Accessor):
             headers['X-Checksum-Md5'] = md5
         if sha1:
             headers['X-Checksum-Sha1'] = sha1
+        if sha256:
+            headers['X-Checksum-Sha256'] = sha256
+        if sha512:
+            headers['X-Checksum-Sha512'] = sha512
 
         text, code = self.rest_put_stream(url,
                                           fobj,
@@ -762,7 +524,7 @@ class _ArtifactoryAccessor(pathlib._Accessor):
                         'api/storage',
                         str(pathobj.relative_to(pathobj.drive)).strip('/')])
 
-        params = { 'properties': encode_properties(props) }
+        params = { 'properties': http.encode_properties(props) }
 
         if not recursive:
             params['recursive'] = '0'
@@ -806,10 +568,7 @@ class _ArtifactoryAccessor(pathlib._Accessor):
         if code != 204:
             raise RuntimeError(text)
 
-
-_artifactory_accessor = _ArtifactoryAccessor()
-
-
+@export
 class ArtifactoryProAccessor(_ArtifactoryAccessor):
     """
     TODO: implement OpenSource/Pro differentiation
@@ -817,28 +576,30 @@ class ArtifactoryProAccessor(_ArtifactoryAccessor):
     pass
 
 
+@export
 class ArtifactoryOpensourceAccessor(_ArtifactoryAccessor):
     """
     TODO: implement OpenSource/Pro differentiation
     """
     pass
 
-
+@export
 class PureArtifactoryPath(pathlib.PurePath):
     """
     A class to work with Artifactory paths that doesn't connect
     to Artifactory server. I.e. it supports only basic path
     operations.
     """
-    _flavour = _artifactory_flavour
+    _flavour = _ArtifactoryFlavour()
     __slots__ = ()
 
 
+@export
 class _FakePathTemplate(object):
     def __init__(self, accessor):
         self._accessor = accessor
 
-
+@export
 class ArtifactoryPath(pathlib.Path, PureArtifactoryPath):
     """
     Implements fully-featured pathlib-like Artifactory interface
@@ -864,7 +625,7 @@ class ArtifactoryPath(pathlib.Path, PureArtifactoryPath):
         """
         obj = pathlib.Path.__new__(cls, *args, **kwargs)
 
-        cfg_entry = get_global_config_entry(obj.drive)
+        cfg_entry = Config[obj.drive]
         obj.auth = kwargs.get('auth', None)
         obj.cert = kwargs.get('cert', None)
 
@@ -885,7 +646,7 @@ class ArtifactoryPath(pathlib.Path, PureArtifactoryPath):
 
     def _init(self, *args, **kwargs):
         if not 'template' in kwargs:
-            kwargs['template'] = _FakePathTemplate(_artifactory_accessor)
+            kwargs['template'] = _FakePathTemplate(_ArtifactoryAccessor())
 
         super(ArtifactoryPath, self)._init(*args, **kwargs)
 
@@ -1100,24 +861,26 @@ class ArtifactoryPath(pathlib.Path, PureArtifactoryPath):
         """
         raise NotImplementedError()
 
-    def deploy(self, fobj, md5=None, sha1=None, parameters={}):
+    def deploy(self, fobj, md5=None, sha1=None, sha256=None, sha512=None, parameters={}):
         """
         Upload the given file object to this path
         """
-        return self._accessor.deploy(self, fobj, md5, sha1, parameters)
+        return self._accessor.deploy(self, fobj, md5, sha1, sha256, sha512, parameters)
 
     def deploy_file(self,
                     file_name,
                     calc_md5=True,
                     calc_sha1=True,
+                    calc_sha256=True,
+                    calc_sha512=True,
                     parameters={}):
         """
         Upload the given file to this path
         """
-        if calc_md5:
-            md5 = md5sum(file_name)
-        if calc_sha1:
-            sha1 = sha1sum(file_name)
+        md5 = utils.md5sum(file_name) if calc_md5 else None
+        sha1 = utils.sha1sum(file_name) if calc_sha1 else None
+        sha256 = utils.sha256sum(file_name) if calc_sha256 else None
+        sha512 = utils.sha512sum(file_name) if calc_sha512 else None
 
         target = self
 
@@ -1125,7 +888,7 @@ class ArtifactoryPath(pathlib.Path, PureArtifactoryPath):
             target = self / pathlib.Path(file_name).name
 
         with open(file_name, 'rb') as fobj:
-            target.deploy(fobj, md5, sha1, parameters)
+            target.deploy(fobj, md5, sha1, sha256, sha512, parameters)
 
     def deploy_deb(self,
                    file_name,
@@ -1257,7 +1020,7 @@ class ArtifactoryPath(pathlib.Path, PureArtifactoryPath):
         """
         return self._accessor.del_properties(self, properties, recursive)
 
-
+@export
 def walk(pathobj, topdown=True):
     """
     os.walk like function to traverse the URI like a file system.
